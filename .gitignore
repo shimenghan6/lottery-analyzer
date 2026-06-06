@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.log
+.env
+account.json
+credentials.json
+node_modules/
