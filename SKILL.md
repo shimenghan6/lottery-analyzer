@@ -126,11 +126,63 @@ description: |
   "首轮亮相"
 ```
 
-4. ✅ 校验 → node validate-data.js + python check_coverage.py
+4. ✅ 校验 → 四重自动校验（每次更新必跑，全部通过才能上传）
    ├── validate-data.js: tip↔score↔htft一致性
-   └── check_coverage.py: 10维覆盖率≥50%(不达标拒绝上传)
+   ├── check_coverage.py: 11维覆盖率≥50%(不达标拒绝上传)
+   ├── ★ SPF-tip一致性: tip必须和最低赔率方向一致(fetch_odds.py内置)
+   └── ★ 交叉泄漏检测: injury文本不能提到非本场比赛的球队名
 
 5. 📡 上传 → GitHub API（不git push）
+
+## 🔴 已知系统性Bug及预防（2026-06-18总结）
+
+### Bug 1: SPF-tip-htft-score矛盾链
+**现象**: SPF=1.35/4.10/6.90(瑞士大热) 但 tip="负"(波黑赢) + htft="负-负" + score="0:1/0:2"
+**根因**: fetch_odds.py只更新SPF赔率，AI预测的tip/htft/score是旧数据，三方各说各话
+**预防**: fetch_odds.py每次更新SPF后自动校验最低赔率方向 → 不一致则自动修正tip+htft+score
+**严重性**: 🔴🔴🔴 直接影响用户决策
+
+### Bug 2: injury/postMatch数据泄漏
+**现象**: 捷克vs南非(id:25)的injury写的是加拿大内容; 奥地利(id:20)的postMatch写的是葡萄牙比赛
+**根因**: data.json缺少home/away字段，无法交叉校验injury文本是否匹配正确的比赛
+**预防**: 
+- 所有match必须有home/away字段
+- 更新injury时检查文本是否包含本场两队名(至少各出现1次)
+- 不包含 → 拒绝写入
+**严重性**: 🔴🔴🔴 用户直接看到错误内容
+
+### Bug 3: injury文本与实际赛果不符
+**现象**: 乌拉圭injury写"首战3-0沙特" 实际result="1:1"; 佛得角injury写"首战0-2负西班牙" 实际result="0:0"
+**根因**: AI预测时假定了赛果，踢完后result更新了但injury文本没跟着改
+**预防**: fetch_odds.py更新result后，检查injury中"首战X-X"是否匹配实际result，不匹配则自动修正
+**严重性**: 🔴🔴 历史数据失真
+
+### Bug 4: 维度覆盖衰减
+**现象**: D5(近5场状态)覆盖率仅3%，29/30场缺失
+**根因**: 后期补的场次injury文本是简化版，没按11维模板写
+**预防**: 
+- 每日运行check_coverage.py
+- 覆盖率<50% → 拒绝上传 → 触发重新搜索补全
+- 新场次必须从模板生成(不能手写简化版)
+**严重性**: 🟡🟡 预测质量下降
+
+### Bug 5: 比赛已踢完但result缺失
+**现象**: 葡萄牙vs民主刚果(6/17踢完)无result字段; 竞彩API未返回赛果
+**根因**: 竞彩live API只保留近3天数据，超时+无可靠fallback
+**预防**: 
+- 至少每天手动搜索已完赛但缺result的场次
+- 搜索"{TeamA} vs {TeamB} World Cup 2026 result score"
+- 从新闻报道提取比分+进球球员
+**严重性**: 🔴🔴 赛果不更新=页面白屏
+
+### Bug 6: Git冲突地狱
+**现象**: 每次推data.json都和调度器冲突(双方同时编辑)
+**根因**: 调度器每小时通过GitHub API直接上传data.json，我手动编辑也推同一个文件
+**预防**: 
+- 手动编辑前先git pull --rebase
+- 冲突时取theirs版本，然后Python脚本重做所有修复
+- 长期: 修复逻辑写入fetch_odds.py，减少手动编辑
+**严重性**: 🟡 浪费时间但不丢数据
 
 ❌ 禁止跳过任何维度
 ❌ 禁止只搜一队
