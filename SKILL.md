@@ -1119,4 +1119,90 @@ URL: https://www.sporttery.cn/ctzc/czgg/
    流程: GET获取sha → PUT上传(base64编码content)
    ❌ 不用 git push
 6. 绝对不跳过校验步骤
+
+## 生产环境数据管道架构（2026-06-25终版）
+
+```
+═══════════════════════════════════════════
+          世界杯数据管道
+═══════════════════════════════════════════
+
+每小时 (Windows调度器 → fetch_odds.py):
+  ├── 营业时间检查: 11:00-22:00(工作日)/11:00-23:00(周末)
+  ├── fetch() → 竞彩API拉SPF赔率 → 按code匹配更新
+  ├── fetch_results() → 三层赛果保障:
+  │   Layer1: 竞彩live API (实时窗口~48h)
+  │   Layer2: postMatch文本持久化 (永久保留)
+  │   Layer3: result↔postMatch自愈校验
+  ├── fill_dimensions() → 8维+预测自动填充
+  └── upload_github() → GitHub API PUT data.json
+
+每天 8:03 + 20:07 (Claude Cron → lottery-analyzer):
+  ├── AI搜索近3天真实情报
+  └── 更新injury字段(真实球员名+伤病标注)
+
+⚠️ data.json上传用GitHub API PUT, 不用git push(避免冲突)
+═══════════════════════════════════════════
+```
+
+## 生产环境踩坑记录（2026-06-18 ~ 2026-06-25）
+
+### 坑7: git push data.json与调度器冲突
+```
+现象: 每次git push data.json都rebase冲突, 数据反复丢失
+根因: 调度器每小时通过GitHub API PUT上传data.json; 我用git push同一文件
+解决: data.json改用GitHub API PUT上传(与调度器同方式), 其他文件继续git push
+      流程: GET sha → PUT (content+sha) → 200 OK
+```
+
+### 坑8: worldcup26.ir API game ID ≠ 我们的match ID
+```
+现象: 西班牙4-0写到了乌拉圭(id:39), 乌拉圭2-2写到了西班牙(id:37)
+根因: API内部排序在R2后偏移, 不能直接用game_id做索引
+尝试: 建EN_MAP用小组+轮次+队名匹配 → 仍有错位
+最终: 彻底移除worldcup26.ir, 只用竞彩API+postMatch持久化
+```
+
+### 坑9: fill_dimensions.py只填injury不填预测字段
+```
+现象: 瑞士vs加拿大(id:49)有injury文本但tip/score/htft/goals全空
+根因: 预测填充被包在 "if filled > 0" 里, 维度不变时跳过
+      fill_dimensions从未填过tip/score/htft/totalGoals/level
+修复: 预测填充独立运行, 从SPF或排名自动推算全部预测字段
+```
+
+### 坑10: 竞彩API只在营业时间返回数据
+```
+现象: 22:00-11:00间API返回空或SPF=None
+原因: 竞彩销售时间 周一至五11:00-22:00 周末11:00-23:00
+修复: fetch_odds.py加in_betting_hours()检查, 非营业时间直接return
+```
+
+### 坑11: 调度器从未触发lottery-analyzer skill
+```
+现象: injury字段只有模板数据(🅕队长/🅜组织核心), 无真实球员名
+根因: fill_dimensions.py是结构安全网, 不搜索web; skill从未被自动触发
+修复: Claude Cron每天8:03+20:07自动触发skill → AI搜索真实情报
+```
+
+### 坑12: SPF=待定的比赛被维度填充过滤
+```
+现象: id:49-72 SPF未开放 → 被fill_dimensions过滤 → 维度永远空的
+根因: upcoming列表过滤条件 "spf != '待定'" 排除了R3比赛
+修复: 去掉spf过滤, 所有完赛前比赛都纳入维度覆盖
+```
+
+### 坑13: Layer3自愈依赖postMatch存在
+```
+现象: 新完赛场次没有postMatch → Layer3无法自愈 → result缺失
+根因: postMatch只能手动/AI写入, 纯API管道不会自动生成
+预防: 每天两次skill运行必须搜索最新赛果, 及时写入postMatch
+```
+
+### 坑14: data.json缺少home/away字段无法交叉校验
+```
+现象: 捷克(id:25)的injury写的是加拿大内容, 无自动检测
+根因: data.json没有home/away, 无法校验injury文本是否匹配正确比赛
+修复: 104场全部补全home/away字段, 可自动交叉校验数据泄漏
+```
 ```
